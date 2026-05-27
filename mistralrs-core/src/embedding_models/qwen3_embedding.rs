@@ -173,7 +173,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
@@ -212,7 +212,7 @@ impl Attention {
             &q,
             &k,
             &v,
-            Some(attention_mask),
+            attention_mask,
             Some(flash_params),
             &self.sdpa_params,
         )?;
@@ -286,7 +286,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
@@ -457,15 +457,19 @@ impl Model {
             xs.dtype(),
             self.cfg.num_attn_heads,
         )?;
-        let Some(attention_mask) = attention_mask else {
-            unreachable!()
-        };
-
+        // `make_*_causal_mask_matrix` returns `None` for single-token sequences
+        // (tgt_len == 1), where no causal mask is needed. Thread the `Option`
+        // through to SDPA (which already accepts it) instead of assuming a mask is
+        // always present — embedding a one-token input would otherwise panic here.
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
+            let attention_mask = match attention_mask.as_ref() {
+                Some(mask) => Some(mask.to_device(xs.device())?),
+                None => None,
+            };
             xs = layer.forward(
                 &xs,
-                &attention_mask.to_device(xs.device())?,
+                attention_mask.as_ref(),
                 &seqlen_offsets,
                 flash_params,
             )?;
